@@ -12,7 +12,9 @@ Note: Tools without cost warnings are free to use as they only read existing dat
 """
 
 import os
+import sys
 import base64
+import io
 import requests
 import time
 from dotenv import load_dotenv
@@ -45,8 +47,104 @@ if not api_host:
 mcp = MCPServer("Minimax",log_level=fastmcp_log_level)
 api_client = MinimaxAPIClient(api_key, api_host)
 
+# (name, description, function) filled by @mcp_tool as each tool is defined.
+_REGISTERED_TOOLS = []
 
-@mcp.tool(
+HTTP_DEFAULT_ALLOWLIST = frozenset({
+    "text_to_audio",
+    "list_voices",
+    "voice_clone",
+    "voice_design",
+    "text_to_image",
+    "generate_video",
+    "query_video_generation",
+})
+
+
+def mcp_tool(description: str):
+    """Register a tool on the stdio server and remember it for HTTP allowlisting."""
+
+    def decorator(fn):
+        _REGISTERED_TOOLS.append((fn.__name__, description, fn))
+        return mcp.tool(description=description)(fn)
+
+    return decorator
+
+
+def _remote_http() -> bool:
+    return os.environ.get(ENV_MCP_REMOTE_HTTP) == "1"
+
+
+def _resolve_model(model: str | None, configured):
+    if model is None or str(model).strip() == "":
+        return configured()
+    return model
+
+
+def _require_remote_url(value: str, field: str) -> None:
+    if isinstance(value, str) and value.startswith(("http://", "https://", "data:")):
+        return
+    raise MinimaxRequestError(
+        f"{field} must be an http(s) URL or a data: URL in remote HTTP mode. "
+        "Local filesystem paths are not allowed."
+    )
+
+
+def _decode_data_url(data_url: str) -> tuple[bytes, str]:
+    header, sep, payload = data_url.partition(",")
+    if sep != "," or ";base64" not in header:
+        raise MinimaxRequestError("data: URL must be base64-encoded (data:<type>;base64,<payload>).")
+    media_type = header[5:].split(";", 1)[0] or "application/octet-stream"
+    try:
+        return base64.b64decode(payload, validate=True), media_type
+    except Exception as exc:
+        raise MinimaxRequestError("data: URL payload is not valid base64.") from exc
+
+
+def _reject_remote_disk_write() -> None:
+    if _remote_http():
+        raise MinimaxRequestError(
+            "Remote HTTP mode does not save files on the server. Results are returned as URLs."
+        )
+
+
+def apply_remote_http_safety() -> None:
+    """Force URL resource mode and block local filesystem access for HTTP mode."""
+    global resource_mode
+    configured = os.getenv(ENV_RESOURCE_MODE)
+    if configured is not None and configured.strip().lower() != RESOURCE_MODE_URL:
+        print(
+            "WARNING: MINIMAX_API_RESOURCE_MODE is ignored in remote HTTP mode. "
+            "Forcing resource mode to 'url' so this server does not read or write local files.",
+            file=sys.stderr,
+        )
+    resource_mode = RESOURCE_MODE_URL
+    os.environ[ENV_MCP_REMOTE_HTTP] = "1"
+
+
+def _upload_voice_clone_file(file: str, is_url: bool) -> dict:
+    if _remote_http():
+        _require_remote_url(file, "file")
+        if file.startswith("data:"):
+            audio_bytes, media_type = _decode_data_url(file)
+            files = {"file": ("audio_file", io.BytesIO(audio_bytes), media_type)}
+            return api_client.post("/v1/files/upload", files=files, data={"purpose": "voice_clone"})
+        is_url = True
+    if is_url:
+        response = requests.get(file, stream=True)
+        response.raise_for_status()
+        files = {"file": ("audio_file.mp3", response.raw, "audio/mpeg")}
+        data = {"purpose": "voice_clone"}
+        return api_client.post("/v1/files/upload", files=files, data=data)
+    if not os.path.exists(file):
+        raise MinimaxRequestError(f"Local file does not exist: {file}")
+    with open(file, "rb") as handle:
+        files = {"file": handle}
+        data = {"purpose": "voice_clone"}
+        return api_client.post("/v1/files/upload", files=files, data=data)
+
+
+@mcp_tool(
     description="""Convert text to audio with a given voice and save the output audio file to a given directory.
     Directory is optional, if not provided, the output file will be saved to $HOME/Desktop.
     Voice id is optional, if not provided, the default voice will be used.
@@ -56,7 +154,7 @@ api_client = MinimaxAPIClient(api_key, api_host)
     Args:
         text (str): The text to convert to speech.
         voice_id (str, optional): The id of the voice to use. For example, "male-qn-qingse"/"audiobook_female_1"/"cute_boy"/"Charming_Lady"...
-        model (string, optional): The model to use.
+        model (string, optional): The model to use. Omit to use the server default (speech-2.8-hd, or MINIMAX_DEFAULT_SPEECH_MODEL).
         speed (float, optional): Speed of the generated audio. Controls the speed of the generated speech. Values range from 0.5 to 2.0, with 1.0 being the default speed. 
         vol (float, optional): Volume of the generated audio. Controls the volume of the generated speech. Values range from 0 to 10, with 1 being the default volume.
         pitch (int, optional): Pitch of the generated audio. Controls the speed of the generated speech. Values range from -12 to 12, with 0 being the default speed.
@@ -76,7 +174,7 @@ def text_to_audio(
     text: str,
     output_directory: str = None,
     voice_id: str = DEFAULT_VOICE_ID,
-    model: str = DEFAULT_SPEECH_MODEL,
+    model: str | None = None,
     speed: float = DEFAULT_SPEED,
     vol: float = DEFAULT_VOLUME,
     pitch: int = DEFAULT_PITCH,
@@ -89,6 +187,10 @@ def text_to_audio(
 ):
     if not text:
         raise MinimaxRequestError("Text is required.")
+
+    if _remote_http():
+        output_directory = None
+    model = _resolve_model(model, configured_speech_model)
 
     payload = {
         "model": model,
@@ -121,6 +223,7 @@ def text_to_audio(
                 type="text",
                 text=f"Success. Audio URL: {audio_data}"
             )
+        _reject_remote_disk_write()
         # hex->bytes
         audio_bytes = bytes.fromhex(audio_data)
 
@@ -144,7 +247,7 @@ def text_to_audio(
         )
 
 
-@mcp.tool(
+@mcp_tool(
     description="""List all voices available.
 
     Args:
@@ -181,14 +284,14 @@ def list_voices(
         )
 
 
-@mcp.tool(
+@mcp_tool(
     description="""Clone a voice using provided audio files. The new voice will be charged upon first use.
 
     COST WARNING: This tool makes an API call to Minimax which may incur costs. Only use when explicitly requested by the user.
 
      Args:
         voice_id (str): The id of the voice to use.
-        file (str): The path to the audio file to clone or a URL to the audio file.
+        file (str): The path to the audio file to clone or a URL to the audio file. In remote HTTP mode only an http(s) URL or a base64 data: URL is accepted; local paths are rejected.
         text (str, optional): The text to use for the demo audio.
         is_url (bool, optional): Whether the file is a URL. Defaults to False.
         output_directory (str): The directory to save the demo audio to.
@@ -204,23 +307,11 @@ def voice_clone(
     is_url: bool = False
 ) -> TextContent:
     try:
+        if _remote_http():
+            output_directory = None
         # step1: upload file
-        if is_url:
-            # download file from url
-            response = requests.get(file, stream=True)
-            response.raise_for_status()
-            files = {'file': ('audio_file.mp3', response.raw, 'audio/mpeg')}
-            data = {'purpose': 'voice_clone'}
-            response_data = api_client.post("/v1/files/upload", files=files, data=data)
-        else:
-            # open and upload file
-            if not os.path.exists(file):
-                raise MinimaxRequestError(f"Local file does not exist: {file}")
-            with open(file, 'rb') as f:
-                files = {'file': f}
-                data = {'purpose': 'voice_clone'}
-                response_data = api_client.post("/v1/files/upload", files=files, data=data)
-            
+        response_data = _upload_voice_clone_file(file, is_url)
+
         file_id = response_data.get("file",{}).get("file_id")
         if not file_id:
             raise MinimaxRequestError(f"Failed to get file_id from upload response")
@@ -232,7 +323,7 @@ def voice_clone(
         }
         if text:
             payload["text"] = text
-            payload["model"] = DEFAULT_SPEECH_MODEL
+            payload["model"] = configured_speech_model()
 
         response_data = api_client.post("/v1/voice_clone", json=payload)
         
@@ -246,6 +337,7 @@ def voice_clone(
                 type="text",
                 text=f"Success. Demo audio URL: {response_data.get('demo_audio')}"
             )
+        _reject_remote_disk_write()
         # step3: download demo audio
         output_path = build_output_path(output_directory, base_path)
         output_file_name = build_output_file("voice_clone", text, output_path, "wav")
@@ -271,7 +363,7 @@ def voice_clone(
         )
 
 
-@mcp.tool(
+@mcp_tool(
     description="""Play an audio file. Supports WAV and MP3 formats. Not supports video.
 
      Args:
@@ -282,6 +374,11 @@ def voice_clone(
     """
 )
 def play_audio(input_file_path: str, is_url: bool = False) -> TextContent:
+    if _remote_http():
+        raise MinimaxRequestError(
+            "play_audio is not available in remote HTTP mode. "
+            "It would read the server filesystem or play audio on the server."
+        )
     if is_url:
         play(requests.get(input_file_path).content)
         return TextContent(type="text", text=f"Successfully played audio file: {input_file_path}")
@@ -292,13 +389,13 @@ def play_audio(input_file_path: str, is_url: bool = False) -> TextContent:
         return TextContent(type="text", text=f"Successfully played audio file: {file_path}")
 
 
-@mcp.tool(
+@mcp_tool(
     description="""Generate a video from a prompt.
 
     COST WARNING: This tool makes an API call to Minimax which may incur costs. Only use when explicitly requested by the user.
 
      Args:
-        model (str, optional): The model to use. Values range ["T2V-01", "T2V-01-Director", "I2V-01", "I2V-01-Director", "I2V-01-live", "MiniMax-Hailuo-02"]. "Director" supports inserting instructions for camera movement control. "I2V" for image to video. "T2V" for text to video. "MiniMax-Hailuo-02" is the latest model with best effect, ultra-clear quality and precise response.
+        model (str, optional): The model to use. Values range ["T2V-01", "T2V-01-Director", "I2V-01", "I2V-01-Director", "I2V-01-live", "MiniMax-Hailuo-02", "MiniMax-Hailuo-2.3"]. "Director" supports inserting instructions for camera movement control. "I2V" for image to video. "T2V" for text to video. Omit to use the server default (MiniMax-Hailuo-2.3, or MINIMAX_DEFAULT_T2V_MODEL).
         prompt (str): The prompt to generate the video from. When use Director model, the prompt supports 15 Camera Movement Instructions (Enumerated Values)
             -Truck: [Truck left], [Truck right]
             -Pan: [Pan left], [Pan right]
@@ -309,7 +406,7 @@ def play_audio(input_file_path: str, is_url: bool = False) -> TextContent:
             -Shake: [Shake]
             -Follow: [Tracking shot]
             -Static: [Static shot]
-        first_frame_image (str): The first frame image. The model must be "I2V" Series.
+        first_frame_image (str): The first frame image. The model must be "I2V" Series. Local paths are read only in stdio mode. In remote HTTP mode pass an http(s) URL or a data: URL; filesystem paths are rejected.
         duration (int, optional): The duration of the video. The model must be "MiniMax-Hailuo-02". Values can be 6 and 10.
         resolution (str, optional): The resolution of the video. The model must be "MiniMax-Hailuo-02". Values range ["768P", "1080P"]
         output_directory (str): The directory to save the video to.
@@ -319,7 +416,7 @@ def play_audio(input_file_path: str, is_url: bool = False) -> TextContent:
     """
 )
 def generate_video(
-    model: str = DEFAULT_T2V_MODEL,
+    model: str | None = None,
     prompt: str = "",
     first_frame_image  = None,
     duration: int = None,
@@ -330,12 +427,17 @@ def generate_video(
     try:
         if not prompt:
             raise MinimaxRequestError("Prompt is required")
+        if _remote_http():
+            output_directory = None
+        model = _resolve_model(model, configured_t2v_model)
 
         # check first_frame_image
         if first_frame_image:
             if not isinstance(first_frame_image, str):
                 raise MinimaxRequestError(f"First frame image must be a string, got {type(first_frame_image)}")
-            if not first_frame_image.startswith(("http://", "https://", "data:")):
+            if _remote_http():
+                _require_remote_url(first_frame_image, "first_frame_image")
+            elif not first_frame_image.startswith(("http://", "https://", "data:")):
                 # if local image, convert to dataurl
                 if not os.path.exists(first_frame_image):
                     raise MinimaxRequestError(f"First frame image does not exist: {first_frame_image}")
@@ -404,6 +506,7 @@ def generate_video(
                 type="text",
                 text=f"Success. Video URL: {download_url}"
             )
+        _reject_remote_disk_write()
         # step4: download and save video
         output_path = build_output_path(output_directory, base_path)
         output_file_name = build_output_file("video", task_id, output_path, "mp4", True)
@@ -437,7 +540,7 @@ def generate_video(
         )
 
 
-@mcp.tool(
+@mcp_tool(
     description="""Query the status of a video generation task.
 
     Args:
@@ -449,6 +552,8 @@ def generate_video(
 )
 def query_video_generation(task_id: str, output_directory: str = None) -> TextContent:
     try:
+        if _remote_http():
+            output_directory = None
         file_id = None
         response_data = api_client.get(f"/v1/query/video_generation?task_id={task_id}")
         status = response_data.get("status")
@@ -475,6 +580,7 @@ def query_video_generation(task_id: str, output_directory: str = None) -> TextCo
                 type="text",
                 text=f"Success. Video URL: {download_url}"
             )
+        _reject_remote_disk_write()
         output_path = build_output_path(output_directory, base_path)
         output_file_name = build_output_file("video", task_id, output_path, "mp4", True)
         output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -496,13 +602,13 @@ def query_video_generation(task_id: str, output_directory: str = None) -> TextCo
         )
 
 
-@mcp.tool(
+@mcp_tool(
     description="""Generate a image from a prompt.
 
     COST WARNING: This tool makes an API call to Minimax which may incur costs. Only use when explicitly requested by the user.
 
      Args:
-        model (str, optional): The model to use. Values range ["image-01"], with "image-01" being the default.
+        model (str, optional): The model to use. Values range ["image-01"], with "image-01" being the default unless MINIMAX_DEFAULT_T2I_MODEL is set. Omit this argument to use the server default.
         prompt (str): The prompt to generate the image from.
         aspect_ratio (str, optional): The aspect ratio of the image. Values range ["1:1", "16:9","4:3", "3:2", "2:3", "3:4", "9:16", "21:9"], with "1:1" being the default.
         n (int, optional): The number of images to generate. Values range [1, 9], with 1 being the default.
@@ -513,7 +619,7 @@ def query_video_generation(task_id: str, output_directory: str = None) -> TextCo
     """
 )
 def text_to_image(
-    model: str = DEFAULT_T2I_MODEL,
+    model: str | None = None,
     prompt: str = "",
     aspect_ratio: str = "1:1",
     n: int = 1,
@@ -523,6 +629,9 @@ def text_to_image(
     try:
         if not prompt:
             raise MinimaxRequestError("Prompt is required")
+        if _remote_http():
+            output_directory = None
+        model = _resolve_model(model, configured_t2i_model)
 
         payload = {
             "model": model, 
@@ -542,6 +651,7 @@ def text_to_image(
                 type="text",
                 text=f"Success. Image URLs: {image_urls}"
             )
+        _reject_remote_disk_write()
         output_path = build_output_path(output_directory, base_path)
         output_file_names = []
         
@@ -572,7 +682,7 @@ def text_to_image(
             text=f"Failed to save images: {str(e)}"
         )
 
-@mcp.tool(
+@mcp_tool(
     description="""Generate a voice based on description prompts.
 
     COST WARNING: This tool makes an API call to Minimax which may incur costs. Only use when explicitly requested by the user.
@@ -597,6 +707,8 @@ def voice_design(
             raise MinimaxRequestError("prompt is required")
         if not preview_text:
             raise MinimaxRequestError("preview_text is required")
+        if _remote_http():
+            output_directory = None
 
        # Build request payload
         payload = {
@@ -622,7 +734,8 @@ def voice_design(
                 type="text",
                 text=f"Success. Voice ID generated: {generated_voice_id}, Trial Audio: {trial_audio_hex}"
             )
-        
+
+        _reject_remote_disk_write()
         # hex->bytes
         audio_bytes = bytes.fromhex(trial_audio_hex)
 
@@ -645,9 +758,24 @@ def voice_design(
             text=f"Failed to design voice: {str(e)}"
         )
 
-def main():
+def _clear_remote_http_flag() -> None:
+    """Stdio must keep today's filesystem behavior even if a parent set the internal flag."""
+    os.environ.pop(ENV_MCP_REMOTE_HTTP, None)
+
+
+def main(argv: list[str] | None = None):
+    """Run the Minimax MCP server.
+
+    Stdio is the default and is unchanged. HTTP mode is selected with
+    MCP_TRANSPORT=http or --transport http.
+    """
+    from minimax_mcp.http_transport import resolve_transport, run_http
+
+    if resolve_transport(argv) == "http":
+        run_http()
+        return
+    _clear_remote_http_flag()
     print("Starting Minimax MCP server")
-    """Run the Minimax MCP server"""
     mcp.run()
 
 
