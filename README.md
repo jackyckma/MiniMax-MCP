@@ -88,12 +88,87 @@ Go to `Cursor -> Preferences -> Cursor Settings -> MCP -> Add new global MCP Ser
 That's it. Your MCP client can now interact with MiniMax through these tools:
 
 ## Transport
-We support two transport types: stdio and sse.
-| stdio  | SSE  |
-|:-----|:-----|
-| Run locally | Can be deployed locally or in the cloud |
-| Communication through `stdout` | Communication through `network` |
-| Input: Supports processing `local files` or valid `URL` resources | Input: When deployed in the cloud, it is recommended to use `URL` for input |
+`main()` starts **stdio** unless you opt into HTTP. There is no SSE server in this package: the older README described SSE, but the code never selected a transport other than the default `mcp.run()` (stdio).
+
+| | stdio (default) | Streamable HTTP |
+|:-----|:-----|:-----|
+| How to start | `minimax-mcp` with no extra flags | `MCP_TRANSPORT=http` or `--transport http` |
+| Where it runs | Local subprocess (Claude Desktop, Cursor, Windsurf) | Remote container, for example Zeabur |
+| Endpoint | stdin / stdout | `http://0.0.0.0:$PORT/mcp` (`PORT` defaults to `8080`) |
+| Auth | Process environment | `Authorization: Bearer <MCP_SERVER_TOKEN>` on every request except `GET /health` |
+| Files | Local paths or URLs, depending on `MINIMAX_API_RESOURCE_MODE` | http(s) or `data:` URLs only. Local paths and `output_directory` are rejected. Resource mode is forced to `url`. |
+
+## Remote deployment (Zeabur / HTTP)
+
+This mode is for a **remote MCP connector** (Claude custom connector, Cursor, ChatGPT). It speaks [Streamable HTTP](https://modelcontextprotocol.io) at `/mcp`, stateless JSON responses, behind a shared bearer token. The same image does not enable `play_audio` and does not read or write the server filesystem.
+
+### Cost and keys
+
+These tools call MiniMax APIs that **spend money or subscription quota**. Only invoke them when you mean to.
+
+- A **Token Plan / M Plan subscription key is not a pay-as-you-go API key**. They are not interchangeable. Put the subscription key in `MINIMAX_API_KEY` only if you intend to draw down that plan; otherwise use a pay-as-you-go key from the same region as `MINIMAX_API_HOST`.
+- Global host: `https://api.minimax.io`. Mainland host: `https://api.minimaxi.com`. A mismatch returns invalid-API-key errors.
+- If the API returns status **2061** (`your current token plan not support model` / "model not available on your plan"), the tool result says so and names the `MINIMAX_DEFAULT_*_MODEL` overrides. Docs list models that subscription keys often do **not** include: MiniMax H3, voice design, and rapid voice cloning. Credits / pay-as-you-go cover a wider set.
+- **Quota (verified from MiniMax docs on 2026-10-28, not a fixed "N per day" for every non-text model):** text, image, and speech share one Token Plan quota, counted in a **5-hour rolling window and a weekly window**. Video on the current M Plan docs is on the **weekly window only** (no 5-hour window). The public docs do not publish one per-day cap that applies to all non-text models. A search snippet of the Token Plan subscribe page mentioned Hailuo 2.3 video at about **3 clips/day (Max) and 5 clips/day (Ultra)**, with Plus excluding video; that page is client-rendered and those daily counts were **not** in the HTML fetched for this README, so treat them as unverified. The console usage bar is the source of truth.
+
+### Environment variables
+
+Set these on the Zeabur service. Zeabur injects `PORT`. Do not commit values.
+
+| Variable | HTTP mode | Purpose |
+|:-----|:-----|:-----|
+| `MINIMAX_API_KEY` | Required | MiniMax key. Never logged. Region must match the host. |
+| `MINIMAX_API_HOST` | Required | `https://api.minimax.io` (global) or `https://api.minimaxi.com` (mainland). |
+| `MCP_SERVER_TOKEN` | Required, non-empty | Bearer secret for `/mcp`. The process refuses to start if this is missing. Generate with `openssl rand -hex 32`. Never logged. |
+| `MCP_TRANSPORT` | `http` | The Docker image sets this. Unset or `stdio` keeps the local subprocess behavior. |
+| `PORT` | Optional | Listen port. Default `8080`. Zeabur sets it. |
+| `MINIMAX_MCP_ALLOWED_TOOLS` | Optional | Comma-separated tool names. Unknown names abort startup. Unset uses the HTTP default below. Ignored in stdio (all tools stay registered). |
+| `MINIMAX_DEFAULT_SPEECH_MODEL` | Optional | Default speech model when a call omits `model`. Unset: `speech-2.8-hd`. |
+| `MINIMAX_DEFAULT_T2V_MODEL` | Optional | Default text-to-video model. Unset: `MiniMax-Hailuo-2.3`. |
+| `MINIMAX_DEFAULT_T2I_MODEL` | Optional | Default text-to-image model. Unset: `image-01`. |
+| `MINIMAX_API_RESOURCE_MODE` | Ignored | HTTP mode forces `url` and warns if this is set to anything else. |
+
+`GET /health` returns `200` and `{"status":"ok"}` with no token, for the platform health check.
+
+HTTP default tools (no `play_audio`): `text_to_audio`, `list_voices`, `voice_clone`, `voice_design`, `text_to_image`, `generate_video`, `query_video_generation`.
+
+`voice_clone` `file` and `generate_video` `first_frame_image` accept only `http://`, `https://`, or base64 `data:` URLs. `output_directory` is ignored. `play_audio` is omitted because it reads local files and plays audio on the machine. In remote HTTP mode, `voice_clone` downloads http(s) audio only from globally routable hosts on ports 80 and 443, re-checks up to 3 redirects, stops above 20 MB, and pins the TCP connection to the resolved public IP (TLS SNI and the Host header stay on the original name); this guard does not apply to stdio, does not inspect bytes a public host returns, and does not fetch `generate_video` image URLs itself.
+
+### Models
+
+Checked against [MiniMax model list](https://platform.minimax.io/docs/faq/models) and the [text-to-video API](https://platform.minimax.io/docs/api-reference/video-generation-t2v) on 2026-10-28. This server still calls the existing `/v1/t2a_v2`, `/v1/image_generation`, and `/v1/video_generation` endpoints. It does **not** call the newer H3 video API.
+
+Speech (verified): `speech-2.8-hd` (built-in default), `speech-2.8-turbo`, `speech-2.6-hd`, `speech-2.6-turbo`, `speech-02-hd`, `speech-02-turbo`.
+
+Text-to-video on `/v1/video_generation` (verified enum): `MiniMax-Hailuo-2.3` (built-in default), `MiniMax-Hailuo-02`, `T2V-01-Director`, `T2V-01`.
+
+Also on the model list, not in that text-to-video enum: `MiniMax-Hailuo-2.3-Fast` (described as image-to-video). Whether this server's `/v1/video_generation` call accepts it is **unverified**.
+
+Image (verified): `image-01` (built-in default), `image-01-live` (docs: text plus a reference image; this tool only sends a prompt, so `image-01-live` behavior here is **unverified**).
+
+`MiniMax-H3` and `MiniMax-H3-Max` are on the model list and use a separate video API. Passing them to `generate_video` is **unverified** and Token Plan docs say H3 is not included. Do not point a subscription key at them unless you have confirmed the key.
+
+### Zeabur
+
+1. Push this repo and create a Zeabur service from it. Zeabur uses the `Dockerfile` (`python:3.12-slim`, non-root user, `MCP_TRANSPORT=http`).
+2. Set `MINIMAX_API_KEY`, `MINIMAX_API_HOST`, and `MCP_SERVER_TOKEN`. Leave `PORT` to Zeabur.
+3. Deploy. The MCP URL is `https://<service>.zeabur.app/mcp`. `https://<service>.zeabur.app/health` should return 200 without a token.
+
+`sounddevice` / `soundfile` (and libportaudio / libsndfile) are an optional `playback` extra. The image does not install them. `play_audio` is not part of the HTTP allowlist; local playback still goes through `ffplay` when you run stdio.
+
+### Claude custom connector
+
+1. In Claude, open **Customize → Connectors → Add custom connector**.
+2. Name it and set the remote MCP URL to `https://<service>.zeabur.app/mcp`.
+3. Set authentication to **None**. This server does not use OAuth.
+4. Under request headers, add `Authorization` with value `Bearer <MCP_SERVER_TOKEN>` (one space after `Bearer`) and mark it required.
+5. In a conversation, use **+ → Add connectors** and enable it. Connectors are per conversation.
+
+The request-headers control has been in beta and may be hidden on some accounts.
+
+### Cursor and ChatGPT
+
+Use the same URL and header. In Cursor, add a remote MCP server whose URL is `https://<service>.zeabur.app/mcp` and whose headers include `Authorization: Bearer <MCP_SERVER_TOKEN>`. ChatGPT custom connectors / developer mode should use that Streamable HTTP URL with the same bearer header. This server does not implement OAuth; if a client can only do OAuth, it cannot connect until that client accepts a static bearer header.
 
 ## Available Tools
 | tool  | description  |

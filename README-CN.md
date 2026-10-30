@@ -90,12 +90,7 @@
 你的MCP客户端现在可以通过Claude Desktop和Cursor等这些工具与MiniMax交互：
 
 ## Transport
-我们支持两种传输方式: stdio and sse.
-| stdio  | SSE  |
-|:-----|:-----|
-| 在本地部署运行 | 本地或云端部署均可  |
-|通过 stdout 进行通信| 通过网络通信|
-|输入：支持处理本地文件，或有效的URL资源| 输入: 若部署在云端，建议使用URL进行输入|
+默认是 **stdio**（`mcp.run()`，没有传输参数）。这个包没有实现 SSE；旧文档里的 SSE 与代码不符。远程部署请用 Streamable HTTP：`MCP_TRANSPORT=http`（或 `--transport http`），端点 `/mcp`，健康检查 `GET /health`。环境变量、Claude 自定义 connector 和费用说明见英文 README 的 “Remote deployment (Zeabur / HTTP)”。HTTP 模式不会读写服务器本地文件，默认也不注册 `play_audio`。
 
 ## 可用方法
 | 方法  | 描述  |
