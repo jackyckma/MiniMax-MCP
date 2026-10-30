@@ -31,6 +31,7 @@ from pathlib import Path
 from minimax_mcp.const import *
 from minimax_mcp.exceptions import MinimaxAPIError, MinimaxRequestError
 from minimax_mcp.client import MinimaxAPIClient
+from minimax_mcp.safe_fetch import fetch_public_url
 
 load_dotenv()
 api_key = os.getenv(ENV_MINIMAX_API_KEY)
@@ -129,7 +130,9 @@ def _upload_voice_clone_file(file: str, is_url: bool) -> dict:
             audio_bytes, media_type = _decode_data_url(file)
             files = {"file": ("audio_file", io.BytesIO(audio_bytes), media_type)}
             return api_client.post("/v1/files/upload", files=files, data={"purpose": "voice_clone"})
-        is_url = True
+        audio_bytes = fetch_public_url(file)
+        files = {"file": ("audio_file.mp3", io.BytesIO(audio_bytes), "audio/mpeg")}
+        return api_client.post("/v1/files/upload", files=files, data={"purpose": "voice_clone"})
     if is_url:
         response = requests.get(file, stream=True)
         response.raise_for_status()

@@ -1,4 +1,3 @@
-import io
 import os
 import socket
 import threading
@@ -281,7 +280,7 @@ def test_remote_mode_accepts_https_and_data_urls(monkeypatch, tmp_path):
     def fake_post(path, **kwargs):
         seen.setdefault("calls", []).append(path)
         if path == "/v1/files/upload":
-            assert "file" in kwargs["files"]
+            assert kwargs["files"]["file"][1].read() == b"ID3fake"
             return {"file": {"file_id": "file-1"}}
         if path == "/v1/voice_clone":
             assert kwargs["json"]["model"] == "speech-2.8-hd"
@@ -293,13 +292,11 @@ def test_remote_mode_accepts_https_and_data_urls(monkeypatch, tmp_path):
 
     monkeypatch.setattr(server.api_client, "post", fake_post)
 
-    class Download:
-        raw = io.BytesIO(b"ID3fake")
+    def fake_fetch(url):
+        assert url == "https://example.com/sample.mp3"
+        return b"ID3fake"
 
-        def raise_for_status(self):
-            return None
-
-    monkeypatch.setattr(server.requests, "get", lambda *args, **kwargs: Download())
+    monkeypatch.setattr(server, "fetch_public_url", fake_fetch)
 
     voice = server.voice_clone(
         "voice-1",

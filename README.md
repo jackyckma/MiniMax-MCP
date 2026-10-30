@@ -132,7 +132,7 @@ Set these on the Zeabur service. Zeabur injects `PORT`. Do not commit values.
 
 HTTP default tools (no `play_audio`): `text_to_audio`, `list_voices`, `voice_clone`, `voice_design`, `text_to_image`, `generate_video`, `query_video_generation`.
 
-`voice_clone` `file` and `generate_video` `first_frame_image` accept only `http://`, `https://`, or base64 `data:` URLs. `output_directory` is ignored. `play_audio` is omitted because it reads local files and plays audio on the machine.
+`voice_clone` `file` and `generate_video` `first_frame_image` accept only `http://`, `https://`, or base64 `data:` URLs. `output_directory` is ignored. `play_audio` is omitted because it reads local files and plays audio on the machine. In remote HTTP mode, `voice_clone` downloads http(s) audio only from globally routable hosts on ports 80 and 443, re-checks up to 3 redirects, stops above 20 MB, and pins the TCP connection to the resolved public IP (TLS SNI and the Host header stay on the original name); this guard does not apply to stdio, does not inspect bytes a public host returns, and does not fetch `generate_video` image URLs itself.
 
 ### Models
 
