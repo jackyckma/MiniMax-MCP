@@ -1,6 +1,11 @@
+import os
+
 import pytest
 from pathlib import Path
 import tempfile
+
+os.environ.setdefault("MINIMAX_API_KEY", "test-api-key")
+os.environ.setdefault("MINIMAX_API_HOST", "https://api.example.invalid")
 
 
 @pytest.fixture

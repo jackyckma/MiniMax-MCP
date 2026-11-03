@@ -25,9 +25,18 @@ def build_output_file(
     return output_path / output_file_name
 
 
+def _remote_http_blocks_local_fs() -> bool:
+    return os.environ.get(ENV_MCP_REMOTE_HTTP) == "1"
+
+
 def build_output_path(
     output_directory: str | None, base_path: str | None = None, is_test: bool = False
 ) -> Path:
+    if _remote_http_blocks_local_fs():
+        raise MinimaxMcpError(
+            "Local output paths are disabled in remote HTTP mode. "
+            "Results are returned as URLs and output_directory is ignored."
+        )
     # Set default base_path to desktop if not provided
     if base_path is None:
         base_path = str(Path.home() / "Desktop")
@@ -116,6 +125,11 @@ def check_audio_file(path: Path) -> bool:
 
 
 def process_input_file(file_path: str, audio_content_check: bool = True) -> Path:
+    if _remote_http_blocks_local_fs():
+        raise MinimaxMcpError(
+            "Local file access is disabled in remote HTTP mode. "
+            "Pass an http(s) URL or a data: URL instead of a filesystem path."
+        )
     if not os.path.isabs(file_path) and not os.environ.get(ENV_MINIMAX_MCP_BASE_PATH):
         raise MinimaxMcpError(
             "File path must be an absolute path if MINIMAX_MCP_BASE_PATH is not set"
@@ -147,6 +161,15 @@ def is_installed(lib_name: str) -> bool:
 def play(
     audio: Union[bytes, Iterator[bytes]]
 ) -> None:
+    if _remote_http_blocks_local_fs():
+        raise ValueError(
+            "Audio playback is disabled in remote HTTP mode. "
+            "play_audio is a local stdio tool and is not available to remote callers."
+        )
+
+    # sounddevice/soundfile are optional (extra "playback") and are not imported
+    # here. Playback uses ffplay so the remote HTTP image does not need
+    # libportaudio or libsndfile. Import them only if a future local path asks.
     if isinstance(audio, Iterator):
         audio = b"".join(audio)
 

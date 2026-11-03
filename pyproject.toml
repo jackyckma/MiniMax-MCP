@@ -23,7 +23,7 @@ keywords = [
 ]
 requires-python = ">=3.10"
 dependencies = [
-    "mcp[cli]>=2.0.0,<3",
+    "mcp[cli]==2.0.0",
     "fastapi>=0.109.2",
     "uvicorn>=0.27.1",
     "python-dotenv>=1.0.1",
@@ -31,8 +31,6 @@ dependencies = [
     "httpx>=0.28.1",
     "fuzzywuzzy>=0.18.0",
     "python-Levenshtein>=0.25.0",
-    "sounddevice>=0.5.1",
-    "soundfile>=0.13.1",
     "requests>=2.31.0",
 ]
 
@@ -40,6 +38,10 @@ dependencies = [
 minimax-mcp = "minimax_mcp.server:main"
 
 [project.optional-dependencies]
+playback = [
+    "sounddevice>=0.5.1",
+    "soundfile>=0.13.1",
+]
 dev = [
     "pre-commit>=3.6.2",
     "ruff>=0.3.0",

@@ -1,8 +1,39 @@
 """Minimax API client base class."""
 
 import requests
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 from minimax_mcp.exceptions import MinimaxAuthError, MinimaxRequestError
+
+
+def _is_model_plan_rejection(status_code: Any, status_msg: str) -> bool:
+    if status_code == 2061:
+        return True
+    text = (status_msg or "").lower()
+    return (
+        "not support model" in text
+        or "not available on your plan" in text
+        or "model not available" in text
+    )
+
+
+def model_plan_error_message(status_code: Any, status_msg: str, trace_id: Optional[str]) -> str:
+    """Readable tool error for MiniMax status 2061 / plan model rejections.
+
+    The message intentionally does not include the API key.
+    """
+    detail = status_msg or "model not available on your plan"
+    trace = f" Trace-Id: {trace_id}." if trace_id else ""
+    return (
+        "This model is not available on your plan "
+        f"(MiniMax status {status_code}: {detail}). "
+        "A Token Plan or M Plan subscription key is separate from a pay-as-you-go API key "
+        "and does not cover every model. Video, voice design, and rapid voice cloning are "
+        "common gaps. Pass a model your key supports, or set MINIMAX_DEFAULT_SPEECH_MODEL, "
+        "MINIMAX_DEFAULT_T2V_MODEL, or MINIMAX_DEFAULT_T2I_MODEL. "
+        "To use models outside the subscription, switch MINIMAX_API_KEY to a pay-as-you-go key "
+        "from the same region as MINIMAX_API_HOST."
+        f"{trace}"
+    )
 
 class MinimaxAPIClient:
     """Base client for making requests to Minimax API."""
@@ -63,8 +94,18 @@ class MinimaxAPIClient:
             
             # Check API-specific error codes
             base_resp = data.get("base_resp", {})
-            if base_resp.get("status_code") != 0:
-                match base_resp.get("status_code"):
+            status_code = base_resp.get("status_code")
+            status_msg = base_resp.get("status_msg") or ""
+            if status_code != 0:
+                if _is_model_plan_rejection(status_code, status_msg):
+                    raise MinimaxRequestError(
+                        model_plan_error_message(
+                            status_code,
+                            status_msg,
+                            response.headers.get("Trace-Id"),
+                        )
+                    )
+                match status_code:
                     case 1004:
                         raise MinimaxAuthError(
                             f"API Error: {base_resp.get('status_msg')}, please check your API key and API host."

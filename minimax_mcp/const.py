@@ -1,3 +1,5 @@
+import os
+
 # speech model default values
 DEFAULT_VOICE_ID = "female-shaonv"
 DEFAULT_SPEECH_MODEL = "speech-2.8-hd"
@@ -27,3 +29,36 @@ RESOURCE_MODE_LOCAL = "local" # save resource to local file system
 RESOURCE_MODE_URL = "url" # provide resource url
 
 ENV_FASTMCP_LOG_LEVEL = "FASTMCP_LOG_LEVEL"
+
+# Remote HTTP deployment. These are read by the server at startup; unset means
+# "keep the built-in default" for model overrides.
+ENV_MCP_TRANSPORT = "MCP_TRANSPORT"
+ENV_MCP_SERVER_TOKEN = "MCP_SERVER_TOKEN"
+ENV_MCP_ALLOWED_TOOLS = "MINIMAX_MCP_ALLOWED_TOOLS"
+ENV_MCP_REMOTE_HTTP = "MINIMAX_MCP_REMOTE_HTTP"
+ENV_DEFAULT_SPEECH_MODEL = "MINIMAX_DEFAULT_SPEECH_MODEL"
+ENV_DEFAULT_T2V_MODEL = "MINIMAX_DEFAULT_T2V_MODEL"
+ENV_DEFAULT_T2I_MODEL = "MINIMAX_DEFAULT_T2I_MODEL"
+
+
+def _env_override(name: str, fallback: str) -> str:
+    value = os.getenv(name)
+    if value is None:
+        return fallback
+    value = value.strip()
+    return value or fallback
+
+
+def configured_speech_model() -> str:
+    """Speech model used when a tool call omits `model`."""
+    return _env_override(ENV_DEFAULT_SPEECH_MODEL, DEFAULT_SPEECH_MODEL)
+
+
+def configured_t2v_model() -> str:
+    """Text-to-video model used when a tool call omits `model`."""
+    return _env_override(ENV_DEFAULT_T2V_MODEL, DEFAULT_T2V_MODEL)
+
+
+def configured_t2i_model() -> str:
+    """Text-to-image model used when a tool call omits `model`."""
+    return _env_override(ENV_DEFAULT_T2I_MODEL, DEFAULT_T2I_MODEL)
